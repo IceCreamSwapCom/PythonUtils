@@ -219,9 +219,7 @@ class RedisConnector(CallbackRegistry):
 
             if not updated_initial and not frozen:
                 # send initial update. If hash is frozen, send once it's unfrozen
-                if len(changed_keys) == 0:
-                    # only need to send initial update if no values have changed, else update is sent either way
-                    self._on_new_data(self.hash_data[redis_key], self.hash_data[redis_key].keys(), channel=channel)
+                self._on_new_data(self.hash_data[redis_key], self.hash_data[redis_key].keys(), channel=channel)
                 updated_initial = True
 
             if len(changed_keys) == 0:
