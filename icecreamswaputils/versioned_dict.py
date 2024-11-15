@@ -36,8 +36,8 @@ class VersionedDict(UserDict):
         return tuple(changes.keys())
 
     @property
-    def changes(self):
-        return self._changes
+    def changed_keys(self):
+        return tuple(self._changes.keys())
 
     def __setitem__(self, key, value):
         if not isinstance(value, Hashable):
