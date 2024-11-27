@@ -5,8 +5,6 @@ DESCRIPTION = 'IceCreamSwap Python utility package'
 LONG_DESCRIPTION = 'IceCreamSwap Python utility package'
 
 requirements = [
-    'numpy',
-    'web3',
     'redis',
     'requests'
 ]

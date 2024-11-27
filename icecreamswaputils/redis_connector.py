@@ -6,11 +6,7 @@ from enum import Enum
 from typing import Optional
 
 import platform
-import numpy as np
 import redis
-
-from hexbytes import HexBytes
-from web3.datastructures import AttributeDict
 
 from .safe_thread import SafeThread
 from .callback_registry import CallbackRegistry
@@ -53,8 +49,13 @@ class RedisConnector(CallbackRegistry):
         self.hash_frozen: dict[str, bool] = {}
 
     def __setitem__(self, redis_key: str | tuple[str, str | slice | list[str] | KeysView], data):
-        if isinstance(data, AttributeDict):
-            data = data.__dict__
+        try:
+            # web3 package is optional, so don't crash if it's not installed
+            from web3.datastructures import AttributeDict
+            if isinstance(data, AttributeDict):
+                data = data.__dict__
+        except ModuleNotFoundError:
+            pass
 
         if isinstance(redis_key, str):
             data_serialized = self.serialize_data(redis_key, data)
@@ -301,10 +302,27 @@ class RedisConnector(CallbackRegistry):
 
     @staticmethod
     def json_default(data):
-        if isinstance(data, HexBytes):
-            return data.hex()
-        if isinstance(data, AttributeDict):
-            return data.__dict__
-        if isinstance(data, np.ndarray):
-            return data.tolist()
+        try:
+            # hexbytes is sub dependency of web3, which is optional
+            from hexbytes import HexBytes
+            if isinstance(data, HexBytes):
+                return data.hex()
+        except ModuleNotFoundError:
+            pass
+
+        try:
+            # web3 is optional
+            from web3.datastructures import AttributeDict
+            if isinstance(data, AttributeDict):
+                return data.__dict__
+        except ModuleNotFoundError:
+            pass
+
+        try:
+            # numpy is an optional dependency
+            import numpy as np
+            if isinstance(data, np.ndarray):
+                return data.tolist()
+        except ModuleNotFoundError:
+            pass
         return data
