@@ -29,7 +29,7 @@ class TestVersionedDict(unittest.TestCase):
         vd['key3'] = 'value3'
 
         # Rollback the last change
-        changes = vd.rollback()
+        changes = vd.revert()
         self.assertEqual(changes, ('key3',))
         self.assertNotIn('key3', vd)
         self.assertEqual(vd['key1'], 'new_value')
@@ -61,8 +61,6 @@ class TestVersionedDict(unittest.TestCase):
         # Mutable values should raise ValueError
         with self.assertRaises(ValueError):
             vd['key4'] = [1, 2, 3]
-        with self.assertRaises(ValueError):
-            vd['key5'] = {'a': 1}
 
     def test_thread_safety(self):
         import threading
@@ -131,10 +129,10 @@ class TestVersionedDict(unittest.TestCase):
         vd.commit()
 
         # Serialize to JSON
-        json_str = vd.to_json()
+        as_obj = vd.to_obj()
 
         # Deserialize from JSON
-        restored_vd = VersionedDict.from_json(json_str)
+        restored_vd = VersionedDict.from_obj(as_obj)
 
         # Check restored object matches the original
         self.assertEqual(restored_vd.data, vd.data)
@@ -157,7 +155,7 @@ class TestVersionedDict(unittest.TestCase):
         vd['key1'] = 'new_value'
         vd['key2'] = 'value2'
 
-        changes = vd.rollback()
+        changes = vd.revert()
         self.assertEqual(set(changes), {'key1', 'key2'})
         self.assertEqual(vd['key1'], 'value1')
         self.assertNotIn('key2', vd)

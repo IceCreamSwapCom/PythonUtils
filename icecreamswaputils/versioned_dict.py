@@ -2,6 +2,7 @@ import json
 from collections import UserDict, deque
 from collections.abc import Hashable
 from threading import Lock
+from types import MappingProxyType
 
 
 class VersionedDict(UserDict):
@@ -20,19 +21,25 @@ class VersionedDict(UserDict):
 
     def rollback(self) -> tuple:
         with self.lock:
-            if self._changes:
-                changes = self._changes
-                self._changes = {}
-            else:
-                if len(self._history) == 0:
-                    raise ValueError("Empty history")
-                changes = self._history.pop()
+            if len(self._history) == 0:
+                raise ValueError("Empty history")
+            changes = self._changes
+            self._changes = {}
+            changes |= self._history.pop()
+            return self._undo_changes(changes)
 
-            for key, value in changes.items():
-                if value is self.KEY_CREATED:
-                    del self.data[key]
-                else:
-                    self.data[key] = value
+    def revert(self) -> tuple:
+        with self.lock:
+            changes = self._changes
+            self._changes = {}
+            return self._undo_changes(changes)
+
+    def _undo_changes(self, changes: dict) -> tuple[str, ...]:
+        for key, value in changes.items():
+            if value is self.KEY_CREATED:
+                del self.data[key]
+            else:
+                self.data[key] = value
         return tuple(changes.keys())
 
     @property
@@ -40,7 +47,9 @@ class VersionedDict(UserDict):
         return tuple(self._changes.keys())
 
     def __setitem__(self, key, value):
-        if not isinstance(value, Hashable):
+        if isinstance(value, dict):
+            pass  # dicts are returned as MappingProxy, which are essentially read only dicts.
+        elif not isinstance(value, Hashable):
             raise ValueError("mutable value not allowed in VersionedDict")
 
         with self.lock:
@@ -61,7 +70,14 @@ class VersionedDict(UserDict):
                 del self._changes[key]
             super().__delitem__(key)
 
-    def to_json(self) -> str:
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        if isinstance(value, dict):
+            # return read only view for dicts to mae sure they are not getting modified
+            value = MappingProxyType(value)
+        return value
+
+    def to_obj(self) -> dict:
         with self.lock:
             # Convert history and changes to lists for JSON serialization
             serializable_history = [
@@ -73,16 +89,15 @@ class VersionedDict(UserDict):
                 key: (value if value is not self.KEY_CREATED else "__CREATED__")
                 for key, value in self._changes.items()
             }
-            return json.dumps({
+            return {
                 "data": self.data,
                 "history": serializable_history,
                 "changes": serializable_changes,
                 "max_history": self._history.maxlen
-            })
+            }
 
     @classmethod
-    def from_json(cls, json_str: str) -> 'VersionedDict':
-        obj = json.loads(json_str)
+    def from_obj(cls, obj: dict) -> 'VersionedDict':
         instance = cls(max_history=obj["max_history"])
         instance.data.update(obj["data"])
         instance._history.extend([
