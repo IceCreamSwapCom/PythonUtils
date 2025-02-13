@@ -59,6 +59,8 @@ class VersionedDict(UserDict):
                 else:
                     if self.data[key] != value:
                         self._changes[key] = self.data[key]
+            elif self._changes[key] == value:
+                del self._changes[key]
 
             super().__setitem__(key, value)
 
