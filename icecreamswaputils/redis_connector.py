@@ -22,6 +22,10 @@ class RedisConnector(CallbackRegistry):
             redis_host: str = 'localhost',
             redis_port: int = 6379,
             redis_db: int = 0,
+            redis_password: str = None,
+            redis_username: str = None,
+            redis_use_ssl: bool = False,
+            ssl_cert_reqs: str = 'required',
     ):
         super().__init__()
         if platform.system() == 'Darwin':
@@ -40,6 +44,10 @@ class RedisConnector(CallbackRegistry):
             host=redis_host,
             port=redis_port,
             db=redis_db,
+            username=redis_username,
+            password=redis_password,
+            ssl=redis_use_ssl,
+            ssl_cert_reqs=ssl_cert_reqs,
             socket_keepalive=True,
             socket_keepalive_options=keep_alive_options
         )
