@@ -26,6 +26,7 @@ class RedisConnector(CallbackRegistry):
             redis_username: str = None,
             redis_use_ssl: bool = False,
             ssl_cert_reqs: str = 'required',
+            health_check_interval: int = 30
     ):
         super().__init__()
         if platform.system() == 'Darwin':
@@ -49,7 +50,8 @@ class RedisConnector(CallbackRegistry):
             ssl=redis_use_ssl,
             ssl_cert_reqs=ssl_cert_reqs,
             socket_keepalive=True,
-            socket_keepalive_options=keep_alive_options
+            socket_keepalive_options=keep_alive_options,
+            health_check_interval=health_check_interval
         )
         self.r.ping()
 
