@@ -3,7 +3,7 @@ import json
 import os
 import socket
 from enum import Enum
-from typing import Optional
+from typing import Optional, Any
 
 import platform
 import redis
@@ -55,7 +55,7 @@ class RedisConnector(CallbackRegistry):
         )
         self.r.ping()
 
-        self.hash_data: dict[str, dict[str]] = {}
+        self.hash_data: dict[str, dict[str, Any]] = {}
         self.hash_frozen: dict[str, bool] = {}
 
     def __setitem__(self, redis_key: str | tuple[str, str | slice | list[str] | KeysView], data):
@@ -67,46 +67,62 @@ class RedisConnector(CallbackRegistry):
         except ModuleNotFoundError:
             pass
 
-        if isinstance(redis_key, str):
-            data_serialized = self.serialize_data(redis_key, data)
-            self.r.set(redis_key, data_serialized)
-        else:
-            # redis hash
-            key, hkey = redis_key
-            if isinstance(hkey, str):
-                data_serialized = json.dumps(data)
-                self.r.hset(key, hkey, data_serialized)
-                updated_hashes = [hkey]
-            elif isinstance(hkey, slice):
-                mapping = {key: json.dumps(value) for key, value in data.items()}
-                # overwrite mapping in redis
-                with self.r.pipeline() as pipe:
+        with self.r.pipeline() as pipe:
+            if isinstance(redis_key, str):
+                data_serialized = self.serialize_data(redis_key, data)
+                pipe.publish(channel=f"string_updates_v2:{redis_key}", message=data_serialized)
+                pipe.set(redis_key, data_serialized)
+            else:
+                # redis hash
+                key, hkey = redis_key
+                deletes = []
+                full_update = False
+                if isinstance(hkey, str):
+                    data_serialized = json.dumps(data)
+                    pipe.hset(key, hkey, data_serialized)
+                    updated_hashes = [hkey]
+                    updates = {hkey: data}
+                elif isinstance(hkey, slice):
+                    mapping = {key: json.dumps(value) for key, value in data.items()}
+                    # overwrite mapping in redis
                     pipe.delete(key)
                     if len(mapping) != 0:
                         pipe.hset(key, mapping=mapping)
-                    pipe.execute()
-                updated_hashes = list(mapping.keys())
-            else:
-                assert len(hkey) == len(data)
+                    updated_hashes = list(mapping.keys())
+                    updates = data
+                    full_update = True
+                else:
+                    assert len(hkey) == len(data)
 
-                updates: dict = {}
-                deletes: list = []
-                for redis_hash, value in zip(hkey, data):
-                    if value is None:
-                        deletes.append(redis_hash)
-                    else:
-                        updates[redis_hash] = json.dumps(value)
+                    updates = {}
+                    updates_serialized: dict = {}
+                    deletes: list = []
+                    for redis_hash, value in zip(hkey, data):
+                        if value is None:
+                            deletes.append(redis_hash)
+                        else:
+                            updates[redis_hash] = value
+                            updates_serialized[redis_hash] = json.dumps(value)
 
-                if len(updates) > 0:
-                    self.r.hset(key, mapping=updates)
-                if len(deletes) > 0:
-                    # remove keys from mapping that have a None value
-                    self.r.hdel(key, *deletes)
-                updated_hashes = list(hkey)
+                    if len(updates_serialized) > 0:
+                        pipe.hset(key, mapping=updates_serialized)
+                    if len(deletes) > 0:
+                        # remove keys from mapping that have a None value
+                        pipe.hdel(key, *deletes)
+                    updated_hashes = list(hkey)
 
-            # create our own kind of keyspace notifications for individual hash keys
-            if len(updated_hashes) > 0:
-                self.publish(f"hash_updates:{key}", updated_hashes)
+
+                # create our own kind of keyspace notifications for individual hash keys
+                if len(updated_hashes) > 0:
+                    pipe.publish(channel=f"hash_updates:{key}", message=RedisConnector.to_json(updated_hashes))
+                if full_update or len(updates) > 0 or len(deletes) > 0:
+                    pipe.publish(channel=f"hash_updates_v2:{key}", message=RedisConnector.to_json({
+                        "isDelta": not full_update,
+                        "updates": updates,
+                        "deletes": deletes,
+                    }))
+
+            pipe.execute()
 
     def __getitem__(self, redis_key: str | tuple[str, str | slice | list[str] | KeysView]):
         if isinstance(redis_key, str):
@@ -177,9 +193,9 @@ class RedisConnector(CallbackRegistry):
 
         # subscribe already to make sure no updates are being lost during loading initial data
         pubsub = self.r.pubsub(ignore_subscribe_messages=True)
-        pubsub.subscribe(f"hash_updates:{redis_key}")
+        pubsub.subscribe(f"hash_updates_v2:{redis_key}")
 
-        # load initial data, afterwards delta updates keep it up to date
+        # load initial data, afterward delta updates keep it up to date
         data_raw = self.r.hgetall(redis_key)
         self.hash_data[redis_key] = {key_encoded.decode(): json.loads(value_serialized) for key_encoded, value_serialized in data_raw.items()}
 
@@ -200,6 +216,7 @@ class RedisConnector(CallbackRegistry):
     def _subscribe_hash_thread(self, pubsub: redis.client.PubSub, redis_key: str, channel: Optional[str] = None):
         updated_initial = False
         frozen_updates = set()
+        full_update = False
         while True:
             messages = []
             # if this hash is frozen, check every second if it got unfrozen. If not frozen, simply wait for next update
@@ -216,40 +233,52 @@ class RedisConnector(CallbackRegistry):
             # caching frozen state so it does not change during processing
             frozen = self.hash_frozen[redis_key]
 
-            changed_keys: list[str] = []
+            changed_data: dict[str, Any] = {}
             if len(messages) != 0:
                 # if we got a message and not a timeout, get updates from the message
                 for message in messages:
-                    changed_keys += json.loads(message["data"])
-                changed_keys = list(set(changed_keys))  # deduplicate
+                    update = json.loads(message["data"])
+                    if not update["isDelta"]:
+                        full_update = True
+                        changed_data = update["updates"]
+                    else:
+                        changed_data |= update["updates"]
+                    for key in update["deletes"]:
+                        changed_data[key] = None
 
             if not frozen and len(frozen_updates) != 0:
                 # flush frozen updates
-                changed_keys = list(frozen_updates | set(changed_keys))
-                frozen_updates = set()
+                changed_data = frozen_updates | changed_data
+                frozen_updates = {}
 
             if not updated_initial and not frozen:
                 # send initial update. If hash is frozen, send once it's unfrozen
                 self._on_new_data(self.hash_data[redis_key], self.hash_data[redis_key].keys(), channel=channel)
                 updated_initial = True
 
-            if len(changed_keys) == 0:
+            if len(changed_data) == 0:
                 continue
 
             if frozen:
                 # store updates instead of actually updating things, will get updated once unfrozen
-                frozen_updates |= set(changed_keys)
+                frozen_updates |= changed_data
                 continue
 
-            changed_values_serialized = self.r.hmget(redis_key, changed_keys)
-            for key, value_serialized in zip(changed_keys, changed_values_serialized):
-                if value_serialized is None:
-                    try:
-                        del self.hash_data[redis_key][key]
-                    except KeyError:
-                        pass
-                else:
-                    self.hash_data[redis_key][key] = json.loads(value_serialized)
+            if full_update:
+                # Hash got overwritten, not just modified. Marking all previous and new keys as being modified
+                changed_keys = list(self.hash_data[redis_key].keys() | changed_data.keys())
+                self.hash_data[redis_key] = changed_data
+                full_update = False
+            else:
+                changed_keys = list(changed_data.keys())
+                for key, value in changed_data.items():
+                    if value is None:
+                        try:
+                            del self.hash_data[redis_key][key]
+                        except KeyError:
+                            pass
+                    else:
+                        self.hash_data[redis_key][key] = value
             self._on_new_data(self.hash_data[redis_key], changed_keys, channel=channel)
         raise Exception("should never return")
 
@@ -300,10 +329,7 @@ class RedisConnector(CallbackRegistry):
 
     @staticmethod
     def to_json(data) -> str:
-        try:
-            return json.dumps(data, default=RedisConnector.json_default)
-        except Exception as e:
-            raise e
+        return json.dumps(data, default=RedisConnector.json_default)
 
     @staticmethod
     def from_json(data_serialized: bytes):
